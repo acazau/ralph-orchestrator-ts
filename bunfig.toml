@@ -1,0 +1,9 @@
+[test]
+preload = ["./tests/setup.ts"]
+
+[install]
+peer = false
+optional = true
+
+[install.cache]
+disable = false

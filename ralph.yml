@@ -1,0 +1,30 @@
+# Ralph Orchestrator Configuration
+# Fixed-cost agent model (Claude Code subscription)
+
+# AI Agent Configuration
+agent: auto                    # Auto-detect available agent (claude, q, gemini)
+prompt_file: PROMPT.md
+max_iterations: 100            # Maximum orchestration loops
+max_runtime: 14400             # Maximum runtime: 4 hours (14400 seconds)
+checkpoint_interval: 5          # Git checkpoint every 5 iterations
+
+# Token/Cost Limits (effectively disabled for fixed-cost agents)
+max_cost: 1000.0               # High limit - not enforced with subscription model
+max_tokens: 100000000          # High limit - not enforced with subscription model
+
+# SonarQube Integration
+sonarqube:
+  enabled: true                # Enable automatic code quality scanning
+  scanOnCheckpoint: true       # Scan after git checkpoints
+  scanAfterIteration: false    # Don't scan after every iteration (too frequent)
+  scanMode: changed            # 'changed' (incremental/fast) or 'full' (complete/slow)
+  failOnQualityGate: false     # Continue orchestration even if quality gate fails
+
+# Git Integration
+git_checkpoint: true           # Create git commits at checkpoint intervals
+archive_prompts: true          # Archive prompt history
+
+# Output Configuration
+verbose: false                 # Set to true for detailed logging
+output_format: rich            # 'plain', 'rich', or 'json'
+output_verbosity: normal       # 'quiet', 'normal', 'verbose', or 'debug'
