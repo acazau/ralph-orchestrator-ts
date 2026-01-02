@@ -120,43 +120,51 @@ export class ClaudeAdapter extends ToolAdapter {
 	 * Build command arguments
 	 */
 	private buildArgs(prompt: string, options?: ExecuteOptions): string[] {
-		const args: string[] = [];
+		// Start with base args for non-interactive output and permission mode
+		const args: string[] = [
+			"--print",
+			"--permission-mode",
+			"acceptEdits",
+		];
 
-		// Add print mode for non-interactive output
-		args.push("--print");
+		// Collect optional args in an array to avoid multiple push calls
+		const optionalArgs: string[] = [];
 
 		// Add model if specified
 		if (options?.model) {
-			args.push("--model", options.model);
+			optionalArgs.push("--model", options.model);
 		}
 
 		// Add system prompt if specified
 		if (options?.systemPrompt) {
-			args.push("--system-prompt", options.systemPrompt);
+			optionalArgs.push("--system-prompt", options.systemPrompt);
 		}
 
 		// Add allowed tools
 		if (options?.allowedTools && options.allowedTools.length > 0) {
-			args.push("--allowedTools", options.allowedTools.join(","));
+			optionalArgs.push("--allowedTools", options.allowedTools.join(","));
 		}
 
 		// Add disallowed tools
 		if (options?.disallowedTools && options.disallowedTools.length > 0) {
-			args.push("--disallowedTools", options.disallowedTools.join(","));
+			optionalArgs.push("--disallowedTools", options.disallowedTools.join(","));
 		}
 
 		// Add verbose flag
 		if (options?.verbose) {
-			args.push("--verbose");
+			optionalArgs.push("--verbose");
 		}
 
+		// Add all optional args at once
+		const result = [...args, ...optionalArgs];
+
 		// Add additional args from config and options
-		mergeAdditionalArgs(args, this.config.args, options?.additionalArgs);
+		mergeAdditionalArgs(result, this.config.args, options?.additionalArgs);
 
 		// Add the prompt as the last argument
-		args.push(prompt);
+		result.push(prompt);
 
-		return args;
+		return result;
 	}
 
 	/**
