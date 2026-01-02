@@ -80,4 +80,4 @@ tests/examples/
    - 0 open issues
    - Coverage >= 80%
 
-When ALL criteria are met, output: TASK_COMPLETED
+When ALL criteria are met, output the text "DONE" on its own line.
