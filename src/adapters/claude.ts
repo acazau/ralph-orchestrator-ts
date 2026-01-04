@@ -1,8 +1,10 @@
 /**
  * Claude adapter for Ralph Orchestrator
- * Uses the Claude CLI tool for execution
+ * Uses the Claude Agent SDK for execution
  */
 
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { CostTracker } from "../metrics/cost-tracker.ts";
 import {
 	type AdapterConfig,
@@ -12,12 +14,8 @@ import {
 	createSuccessResponse,
 } from "../types/index.ts";
 import { createLogger } from "../utils/logger.ts";
-import {
-	estimateTokens,
-	extractErrorMessage,
-	mergeAdditionalArgs,
-} from "../utils/shared.ts";
-import { ToolAdapter, executeCLICommand } from "./base.ts";
+import { estimateTokens, extractErrorMessage } from "../utils/shared.ts";
+import { ToolAdapter } from "./base.ts";
 
 const logger = createLogger("ralph-orchestrator.claude");
 
@@ -33,177 +31,190 @@ const CLAUDE_PRICING: Record<string, { input: number; output: number }> = {
 };
 
 /**
- * Claude adapter implementation
+ * SDK message types
+ */
+interface SDKMessage {
+	type: string;
+	subtype?: string;
+	message?: {
+		role?: string;
+		content?: Array<{ type: string; text?: string }>;
+	};
+	result?: string;
+	is_error?: boolean;
+	session_id?: string;
+}
+
+/**
+ * Extracted output result
+ */
+interface ExtractedOutput {
+	output: string;
+	success: boolean;
+}
+
+/**
+ * Extract output from a result message
+ */
+function extractFromResultMessage(resultMessage: SDKMessage): ExtractedOutput {
+	const success = !resultMessage.is_error;
+	const hasSuccessResult =
+		resultMessage.subtype === "success" && resultMessage.result;
+
+	const output = hasSuccessResult
+		? resultMessage.result!
+		: `Execution ${resultMessage.subtype}: ${resultMessage.result ?? "no result"}`;
+
+	return { output, success };
+}
+
+/**
+ * Extract text content from assistant messages
+ */
+function extractFromAssistantMessages(messages: SDKMessage[]): ExtractedOutput {
+	const outputTexts: string[] = [];
+
+	for (const msg of messages) {
+		const texts = extractTextFromMessage(msg);
+		outputTexts.push(...texts);
+	}
+
+	const hasOutput = outputTexts.length > 0;
+	return {
+		output: hasOutput ? outputTexts.join("\n") : "No output from Claude",
+		success: hasOutput,
+	};
+}
+
+/**
+ * Extract text blocks from a single message
+ */
+function extractTextFromMessage(msg: SDKMessage): string[] {
+	if (msg.type !== "assistant" || !msg.message?.content) {
+		return [];
+	}
+
+	return msg.message.content
+		.filter((block) => block.type === "text" && block.text)
+		.map((block) => block.text!);
+}
+
+/**
+ * Claude adapter implementation using Agent SDK
  */
 export class ClaudeAdapter extends ToolAdapter {
-	private readonly claudeCommand: string = "claude";
-
 	constructor(config?: Partial<AdapterConfig>) {
 		super("claude", config);
+		// SDK is always available if the package is installed
+		this.setAvailable(true);
 	}
 
 	/**
-	 * Check if Claude CLI is available
+	 * Check if Claude SDK is available
 	 */
 	async checkAvailability(): Promise<boolean> {
-		return this.checkCommandExists(
-			this.claudeCommand,
-			"Claude CLI not found in PATH",
-		);
+		// SDK is available if we can import it (which we already have)
+		this.setAvailable(true);
+		return true;
 	}
 
 	/**
-	 * Execute Claude with the given prompt
+	 * Execute Claude with the given prompt using Agent SDK
 	 */
 	async execute(
 		prompt: string,
 		options?: ExecuteOptions,
 	): Promise<ToolResponse> {
-		if (!this.available && !(await this.checkAvailability())) {
-			return createErrorResponse("Claude CLI is not available");
-		}
-
 		const enhancedPrompt = this.enhancePromptWithInstructions(prompt);
+		const startTime = Date.now();
 
-		// Build command arguments
-		const args = this.buildArgs(enhancedPrompt, options);
-
-		logger.debug(`Executing Claude with ${args.length} arguments`);
+		logger.debug("Executing Claude via Agent SDK");
 
 		try {
-			const result = await executeCLICommand([this.claudeCommand, ...args], {
-				timeout: options?.timeout ?? this.config.timeout * 1000,
-				env: options?.env,
-			});
-
-			if (!result.success) {
-				logger.error(`Claude execution failed: ${result.stderr}`);
-				return createErrorResponse(
-					result.stderr || `Claude exited with code ${result.exitCode}`,
-					result.stdout,
-					{ exitCode: result.exitCode, duration: result.duration },
-				);
-			}
-
-			const tokensUsed = this.extractTokenUsage(result.stdout);
-			const cost = tokensUsed
-				? CostTracker.estimateCost(
-						"claude",
-						tokensUsed.input,
-						tokensUsed.output,
-					)
-				: undefined;
-
-			logger.debug(
-				`Claude execution completed in ${result.duration.toFixed(2)}s`,
+			const { messages, resultMessage } = await this.runQuery(
+				enhancedPrompt,
+				options,
 			);
+			const duration = (Date.now() - startTime) / 1000;
 
-			return createSuccessResponse(result.stdout, {
-				tokensUsed: tokensUsed
-					? tokensUsed.input + tokensUsed.output
-					: undefined,
-				cost,
-				metadata: {
-					duration: result.duration,
-					exitCode: result.exitCode,
-					model: options?.model,
-				},
-			});
+			const extracted = resultMessage
+				? extractFromResultMessage(resultMessage)
+				: extractFromAssistantMessages(messages);
+
+			if (!extracted.success) {
+				logger.error(`Claude SDK execution failed: ${extracted.output}`);
+				return createErrorResponse(extracted.output, undefined, { duration });
+			}
+
+			return this.buildSuccessResponse(
+				enhancedPrompt,
+				extracted.output,
+				duration,
+				options,
+				resultMessage,
+			);
 		} catch (error) {
+			const duration = (Date.now() - startTime) / 1000;
 			const message = extractErrorMessage(error);
-			logger.error(`Claude execution error: ${message}`);
-			return createErrorResponse(message);
+			logger.error(`Claude SDK error: ${message}`);
+			return createErrorResponse(message, undefined, { duration });
 		}
 	}
 
 	/**
-	 * Build command arguments
+	 * Run the SDK query and collect messages
 	 */
-	private buildArgs(prompt: string, options?: ExecuteOptions): string[] {
-		// Start with base args for non-interactive output and permission mode
-		const args: string[] = [
-			"--print",
-			"--permission-mode",
-			"acceptEdits",
-		];
+	private async runQuery(
+		prompt: string,
+		options?: ExecuteOptions,
+	): Promise<{ messages: SDKMessage[]; resultMessage: SDKMessage | null }> {
+		const sdkOptions: Options = {
+			cwd: process.cwd(),
+			permissionMode: "bypassPermissions",
+			systemPrompt: options?.systemPrompt,
+			allowedTools: options?.allowedTools,
+		};
 
-		// Collect optional args in an array to avoid multiple push calls
-		const optionalArgs: string[] = [];
+		const messages: SDKMessage[] = [];
+		let resultMessage: SDKMessage | null = null;
 
-		// Add model if specified
-		if (options?.model) {
-			optionalArgs.push("--model", options.model);
-		}
+		for await (const message of query({ prompt, options: sdkOptions })) {
+			const sdkMessage = message as SDKMessage;
+			messages.push(sdkMessage);
 
-		// Add system prompt if specified
-		if (options?.systemPrompt) {
-			optionalArgs.push("--system-prompt", options.systemPrompt);
-		}
-
-		// Add allowed tools
-		if (options?.allowedTools && options.allowedTools.length > 0) {
-			optionalArgs.push("--allowedTools", options.allowedTools.join(","));
-		}
-
-		// Add disallowed tools
-		if (options?.disallowedTools && options.disallowedTools.length > 0) {
-			optionalArgs.push("--disallowedTools", options.disallowedTools.join(","));
-		}
-
-		// Add verbose flag
-		if (options?.verbose) {
-			optionalArgs.push("--verbose");
-		}
-
-		// Add all optional args at once
-		const result = [...args, ...optionalArgs];
-
-		// Add additional args from config and options
-		mergeAdditionalArgs(result, this.config.args, options?.additionalArgs);
-
-		// Add the prompt as the last argument
-		result.push(prompt);
-
-		return result;
-	}
-
-	/**
-	 * Try to extract token usage from output
-	 */
-	private extractTokenUsage(
-		output: string,
-	): { input: number; output: number } | null {
-		// Look for token usage patterns in output
-		const patterns = [
-			/input[_\s]?tokens?:\s*(\d+)/i,
-			/output[_\s]?tokens?:\s*(\d+)/i,
-			/tokens?[_\s]?used:\s*(\d+)/i,
-		];
-
-		let inputTokens = 0;
-		let outputTokens = 0;
-
-		for (const pattern of patterns) {
-			const match = pattern.exec(output);
-			if (match?.[1]) {
-				const value = Number.parseInt(match[1], 10);
-				if (pattern.source.includes("input")) {
-					inputTokens = value;
-				} else if (pattern.source.includes("output")) {
-					outputTokens = value;
-				} else {
-					// Generic "tokens used" - estimate split
-					inputTokens = Math.floor(value * 0.3);
-					outputTokens = Math.floor(value * 0.7);
-				}
+			if (sdkMessage.type === "result") {
+				resultMessage = sdkMessage;
 			}
 		}
 
-		if (inputTokens > 0 || outputTokens > 0) {
-			return { input: inputTokens, output: outputTokens };
-		}
+		return { messages, resultMessage };
+	}
 
-		return null;
+	/**
+	 * Build a success response with metrics
+	 */
+	private buildSuccessResponse(
+		prompt: string,
+		output: string,
+		duration: number,
+		options?: ExecuteOptions,
+		resultMessage?: SDKMessage | null,
+	): ToolResponse {
+		const inputTokens = estimateTokens(prompt);
+		const outputTokens = estimateTokens(output);
+		const cost = CostTracker.estimateCost("claude", inputTokens, outputTokens);
+
+		logger.debug(`Claude SDK execution completed in ${duration.toFixed(2)}s`);
+
+		return createSuccessResponse(output, {
+			tokensUsed: inputTokens + outputTokens,
+			cost,
+			metadata: {
+				duration,
+				model: options?.model,
+				sessionId: resultMessage?.session_id,
+			},
+		});
 	}
 
 	/**

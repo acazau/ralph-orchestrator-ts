@@ -20,9 +20,9 @@ describe("ClaudeAdapter", () => {
 		expect(adapter.name).toBe("claude");
 	});
 
-	test("should initially be unavailable", () => {
-		// Before checkAvailability is called, available is false
-		expect(adapter.available).toBe(false);
+	test("should be available (SDK is always available)", () => {
+		// SDK-based adapter is always available if the package is installed
+		expect(adapter.available).toBe(true);
 	});
 
 	test("should return string representation", () => {
